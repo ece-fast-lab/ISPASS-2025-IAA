@@ -31,6 +31,7 @@ fig3.png
 
 ## 📌 Description
 This script generates and visualizes the results of the **speedups achieved through functional pipelining**, comparing non-pipelined and pipelined performance
+
 ---
 
 ### **Explanation of Flags**
