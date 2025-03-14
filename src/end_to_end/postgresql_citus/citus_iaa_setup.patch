@@ -1,0 +1,1093 @@
+diff --git a/src/backend/columnar/Makefile b/src/backend/columnar/Makefile
+index ded52a98d..0ad839707 100644
+--- a/src/backend/columnar/Makefile
++++ b/src/backend/columnar/Makefile
+@@ -17,7 +17,9 @@ generated_downgrade_sql_files += $(patsubst %,$(citus_abs_srcdir)/build/sql/%,$(
+ 
+ DATA_built = $(generated_sql_files)
+ 
+-PG_CPPFLAGS += -I$(libpq_srcdir) -I$(safestringlib_srcdir)/include
++# PG_CPPFLAGS += -I$(libpq_srcdir) -I$(safestringlib_srcdir)/include
++PG_CPPFLAGS += -I$(libpq_srcdir) -I$(safestringlib_srcdir)/include -I/PATH_TO/qpl/include/qpl # MODIFY the directory to /include/qpl. Example) "/home/user/intel-iaa-eval/qpl/include/qpl"
++SHLIB_LINK += -L/PATH_TO/qpl/build/lib -lqpl -lstdc++ # MODIFY the directory to /lib. Example) "/home/user/intel-iaa-eval/qpl/build/lib"
+ 
+ include $(citus_top_builddir)/Makefile.global
+ 
+diff --git a/src/backend/columnar/columnar.c b/src/backend/columnar/columnar.c
+index 4914bbc3a..f5cb0cf08 100644
+--- a/src/backend/columnar/columnar.c
++++ b/src/backend/columnar/columnar.c
+@@ -47,6 +47,7 @@ static const struct config_enum_entry columnar_compression_options[] =
+ {
+ 	{ "none", COMPRESSION_NONE, false },
+ 	{ "pglz", COMPRESSION_PG_LZ, false },
++	{"qpl", COMPRESSION_QPL, false},
+ #if HAVE_CITUS_LIBLZ4
+ 	{ "lz4", COMPRESSION_LZ4, false },
+ #endif
+diff --git a/src/backend/columnar/columnar_compression.c b/src/backend/columnar/columnar_compression.c
+index 2ff35da98..09c2e51a1 100644
+--- a/src/backend/columnar/columnar_compression.c
++++ b/src/backend/columnar/columnar_compression.c
+@@ -16,6 +16,20 @@
+ #include "common/pg_lzcompress.h"
+ #include "lib/stringinfo.h"
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <qpl/qpl.h>
++#ifdef __cplusplus
++}
++#endif
++#include <stdlib.h>   // For malloc and free
++#include <stdint.h>   // For uint8_t, uint32_t
++#include <string.h>
++#include <time.h>
++#include <sys/time.h>
++
+ #include "citus_version.h"
+ #include "pg_version_constants.h"
+ 
+@@ -65,13 +79,17 @@ bool
+ CompressBuffer(StringInfo inputBuffer,
+ 			   StringInfo outputBuffer,
+ 			   CompressionType compressionType,
+-			   int compressionLevel)
++			   int compressionLevel, qpl_job** job)
+ {
+ 	switch (compressionType)
+ 	{
+ #if HAVE_CITUS_LIBLZ4
+ 		case COMPRESSION_LZ4:
+ 		{
++			elog(DEBUG1,"-------------------LZ4_compressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
+ 			int maximumLength = LZ4_compressBound(inputBuffer->len);
+ 
+ 			resetStringInfo(outputBuffer);
+@@ -92,6 +110,10 @@ CompressBuffer(StringInfo inputBuffer,
+ 				 compressedSize);
+ 
+ 			outputBuffer->len = compressedSize;
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
+ 			return true;
+ 		}
+ #endif
+@@ -99,6 +121,10 @@ CompressBuffer(StringInfo inputBuffer,
+ #if HAVE_LIBZSTD
+ 		case COMPRESSION_ZSTD:
+ 		{
++			elog(DEBUG1,"-------------------ZSTD_compressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
+ 			int maximumLength = ZSTD_compressBound(inputBuffer->len);
+ 
+ 			resetStringInfo(outputBuffer);
+@@ -116,14 +142,26 @@ CompressBuffer(StringInfo inputBuffer,
+ 								  (errdetail("%s", ZSTD_getErrorName(compressedSize)))));
+ 				return false;
+ 			}
++			
++			elog(DEBUG1, "compressed %d bytes to %lu bytes", inputBuffer->len,
++				 compressedSize);
+ 
+ 			outputBuffer->len = compressedSize;
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
+ 			return true;
+ 		}
+ #endif
+ 
+ 		case COMPRESSION_PG_LZ:
+ 		{
++			elog(DEBUG1,"-------------------PGLZ_compressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++
+ 			uint64 maximumLength = PGLZ_MAX_OUTPUT(inputBuffer->len) +
+ 								   COLUMNAR_COMPRESS_HDRSZ;
+ 			bool compressionResult = false;
+@@ -149,9 +187,254 @@ CompressBuffer(StringInfo inputBuffer,
+ 				outputBuffer->len = VARSIZE(outputBuffer->data);
+ 			}
+ 
++			elog(DEBUG1, "compressed %d bytes to %d bytes", inputBuffer->len,
++				 outputBuffer->len);
++			
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
++
+ 			return compressionResult;
+ 		}
+ 
++		case COMPRESSION_QPL:
++		{
++			elog(DEBUG1,"-------------------IAA_compressed-------------------");
++			elog(DEBUG1, "compressed %d bytes", inputBuffer->len);
++			// struct timeval start, end, init_end, query_start, query_end, wait_start, wait_end;
++			struct timespec start, end, start_init, end_init;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++			resetStringInfo(outputBuffer);
++
++			qpl_status status;
++			qpl_path_t execution_path = qpl_path_hardware;
++			int src_file_left = inputBuffer->len;
++			int chunk_size = 2 * 1024 * 1024;
++
++			if (src_file_left <= chunk_size) {
++				outputBuffer->maxlen = chunk_size;
++				enlargeStringInfo(outputBuffer, chunk_size);
++				
++				int job_arg = src_file_left;
++
++				// elog(DEBUG1, "inputBuffer->len: %d \n", src_file_left);
++				// elog(DEBUG1, "job_arg: %d \n", job_arg);
++				job[0]->op				= qpl_op_compress;
++				job[0]->level			= qpl_default_level;
++				job[0]->next_in_ptr	= (uint8_t *)(inputBuffer->data);
++				job[0]->next_out_ptr	= (uint8_t *)(outputBuffer->data);
++				job[0]->available_in	= job_arg;
++				job[0]->available_out	= job_arg;
++				job[0]->flags			= QPL_FLAG_FIRST | QPL_FLAG_LAST | QPL_FLAG_DYNAMIC_HUFFMAN | QPL_FLAG_OMIT_VERIFY;
++				status = qpl_execute_job(job[0]);
++				if (status != QPL_STS_OK) {
++					elog(DEBUG1, "An error %d acquired during job execution.\n", status);
++					// free(job_buffer);  // Free the allocated memory
++					return false;
++				}
++				src_file_left -= job_arg;
++				int decompressed_size = job[0]->total_out;
++				outputBuffer->len = decompressed_size;
++
++				if (decompressed_size <= 0)
++				{
++					elog(DEBUG1,
++						"failure in IAA_compress_default, input size=%d, output size=%d",
++						inputBuffer->len, decompressed_size);
++					// free(job_buffer);
++					return false;
++				}
++				elog(DEBUG1, "IAA_compressed %d bytes to %d bytes", inputBuffer->len, decompressed_size);
++			} else {
++				int num = (src_file_left + chunk_size - 1) / chunk_size;
++				int *num_array = (int *)malloc(num * sizeof(int));
++				int source_idx = 0;
++    			int dest_idx = 0;
++				int iter = 0;
++				int last_check = 0;
++				outputBuffer->maxlen = src_file_left;
++				enlargeStringInfo(outputBuffer, src_file_left);
++
++				allocator_t default_allocator = { malloc, free };
++				// Huffman table initialization
++				qpl_histogram              deflate_histogram = {0};
++				qpl_huffman_table_t huffman_table = NULL;
++
++				int num_engine = 8;
++				elog(DEBUG1, "NUM: %d", num);
++
++				// static start
++				while (src_file_left > 0) {
++					
++					int job_arg = src_file_left <= chunk_size ? src_file_left : chunk_size;
++					status = qpl_deflate_huffman_table_create(combined_table_type, execution_path, default_allocator, &huffman_table);
++					if (status != QPL_STS_OK) {
++						elog(DEBUG1, "An error %d acquired during Huffman table creation\n", status);
++						// free(job_buffer);  // Free the allocated memory
++						free(num_array);
++						return false;
++					}
++
++					// Filling deflate histogram first
++					// int huffman_table_window_size = src_file_left <= 2*1024*1024 ? src_file_left : 2 * 1024 * 1024;
++					int huffman_table_window_size = job_arg;
++					status = qpl_gather_deflate_statistics((uint8_t *)(inputBuffer->data + source_idx), huffman_table_window_size, &deflate_histogram, qpl_default_level,
++														execution_path);
++					if (status != QPL_STS_OK) {
++						elog(DEBUG1, "An error %d acquired during gathering statistics for Huffman table\n", status);
++						// free(job_buffer);  // Free the allocated memory
++						free(num_array);
++						qpl_huffman_table_destroy(huffman_table);
++						return false;
++					}
++
++					// Building the Huffman table
++					status = qpl_huffman_table_init_with_histogram(huffman_table, &deflate_histogram);
++					if (status != QPL_STS_OK) {
++						elog(DEBUG1, "An error %d acquired during Huffman table initialization\n", status);
++						// free(job_buffer);  // Free the allocated memory
++						free(num_array);
++						qpl_huffman_table_destroy(huffman_table);
++						return false;
++					}
++
++					int job_idx = iter % num_engine;
++					job[job_idx]->op				= qpl_op_compress;
++					job[job_idx]->level			= qpl_default_level;
++					job[job_idx]->next_in_ptr	= (uint8_t *)(inputBuffer->data + source_idx);
++					job[job_idx]->next_out_ptr	= (uint8_t *)(outputBuffer->data + chunk_size * iter);
++					job[job_idx]->available_in	= job_arg;
++					job[job_idx]->available_out	= job_arg;
++					// job[iter]->flags			= QPL_FLAG_FIRST | QPL_FLAG_LAST | QPL_FLAG_DYNAMIC_HUFFMAN | QPL_FLAG_OMIT_VERIFY;
++					job[job_idx]->flags			= QPL_FLAG_FIRST | QPL_FLAG_LAST | QPL_FLAG_OMIT_VERIFY;
++					job[job_idx]->huffman_table = huffman_table;
++					status = qpl_submit_job(job[job_idx]);
++					if (status != QPL_STS_OK) {
++						elog(DEBUG1, "An error %d acquired during job execution.\n", status);
++						// free(job_buffer);  // Free the allocated memory
++						free(num_array);
++						return false;
++					}
++					source_idx += job_arg;
++        			src_file_left -= job_arg;
++					iter++;
++					if (iter >= num_engine && iter % (num_engine / 2) == 0) {
++						int a = (iter / (num_engine / 2) % 2) * (num_engine / 2);
++						for (int i = a; i < a + (num_engine / 2); i++) {
++							clock_gettime(CLOCK_MONOTONIC, &start_init);
++							status = qpl_wait_job(job[i]);
++							if (status != QPL_STS_OK) {
++								elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++								return false;
++							}
++							clock_gettime(CLOCK_MONOTONIC, &end_init);
++							elapsed = (end_init.tv_sec - start_init.tv_sec) + (end_init.tv_nsec - start_init.tv_nsec) / 1e9;
++							elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
++							int compressed_size = job[i]->total_out;
++							int num_array_idx = (iter / num_engine - 1) * num_engine + i;
++							memmove(outputBuffer->data + dest_idx, outputBuffer->data + num_array_idx * chunk_size, compressed_size);
++							dest_idx += compressed_size;
++							elog(DEBUG1, "num_array_idx: %d",num_array_idx );
++							num_array[num_array_idx] = compressed_size;
++						}
++						last_check = a+ (num_engine / 2);
++					}
++					if (src_file_left == 0) {
++						qpl_huffman_table_destroy(huffman_table);
++					}
++				}
++				if (last_check == (num_engine/2)) {
++					int a = 0;
++					if (iter >= num_engine) {
++						a = num_engine;
++					}
++					for (int i = last_check; i < a; i++) {
++						clock_gettime(CLOCK_MONOTONIC, &start_init);
++						status = qpl_wait_job(job[i]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++							return false;
++						}
++						clock_gettime(CLOCK_MONOTONIC, &end_init);
++						elapsed = (end_init.tv_sec - start_init.tv_sec) + (end_init.tv_nsec - start_init.tv_nsec) / 1e9;
++						elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
++						int compressed_size = job[i]->total_out;
++						int num_array_idx = (iter / num_engine - 1) * num_engine + i;
++						elog(DEBUG1, "num_array_idx: %d",num_array_idx );
++						memmove(outputBuffer->data + dest_idx, outputBuffer->data + num_array_idx * chunk_size, compressed_size);
++						dest_idx += compressed_size;
++						num_array[num_array_idx] = compressed_size;
++					}
++					a = iter % num_engine;
++					for (int i = 0; i < a; i++) {
++						clock_gettime(CLOCK_MONOTONIC, &start_init);
++						status = qpl_wait_job(job[i]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++							return false;
++						}
++						clock_gettime(CLOCK_MONOTONIC, &end_init);
++						elapsed = (end_init.tv_sec - start_init.tv_sec) + (end_init.tv_nsec - start_init.tv_nsec) / 1e9;
++						elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
++						int compressed_size = job[i]->total_out;
++						int num_array_idx = iter / num_engine * num_engine + i;
++						elog(DEBUG1, "num_array_idx: %d",num_array_idx );
++						memmove(outputBuffer->data + dest_idx, outputBuffer->data + num_array_idx * chunk_size, compressed_size);
++						dest_idx += compressed_size;
++						num_array[num_array_idx] = compressed_size;
++					}
++				} else {
++					int a = iter % num_engine;
++					for (int i = iter - a; i < iter; i++) {
++						int job_idx = i % num_engine;
++						clock_gettime(CLOCK_MONOTONIC, &start_init);
++						status = qpl_wait_job(job[job_idx]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during wait execution.\n", status);
++							return false;
++						}
++						clock_gettime(CLOCK_MONOTONIC, &end_init);
++						elapsed = (end_init.tv_sec - start_init.tv_sec) + (end_init.tv_nsec - start_init.tv_nsec) / 1e9;
++						elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
++						int compressed_size = job[job_idx]->total_out;
++						int num_array_idx = i;
++						elog(DEBUG1, "iter: %d, num_array_idx: %d",iter, num_array_idx );
++						memmove(outputBuffer->data + dest_idx, outputBuffer->data + num_array_idx * chunk_size, compressed_size);
++						dest_idx += compressed_size;
++						num_array[num_array_idx] = compressed_size;
++					}
++				}
++
++				for(int i = 0; i < num; i ++) {
++					memcpy(outputBuffer->data + dest_idx + 4 * i, &num_array[i], sizeof(num_array[i]));
++				}
++				free(num_array);
++				outputBuffer->len = dest_idx + num * 4;
++				if (dest_idx <= 0)
++				{
++					elog(DEBUG1,
++						"failure in IAA_compress_default, input size=%d, output size=%d",
++						inputBuffer->len, dest_idx);
++					// free(job_buffer);
++					return false;
++				}
++				elog(DEBUG1, "IAA_compressed %d bytes to %d bytes", inputBuffer->len, dest_idx);
++			}
++			
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
++
++			// for (int i = 0; i< 8; i++) {
++			// 	free(job_buffer[i]);
++			// }
++			// free(job_buffer);
++			return true;
++		}
++
+ 		default:
+ 		{
+ 			return false;
+@@ -167,7 +450,7 @@ CompressBuffer(StringInfo inputBuffer,
+ StringInfo
+ DecompressBuffer(StringInfo buffer,
+ 				 CompressionType compressionType,
+-				 uint64 decompressedSize)
++				 uint64 decompressedSize, qpl_job** job, char** temp_decompressedBuffer, int prev_maxlen)
+ {
+ 	switch (compressionType)
+ 	{
+@@ -179,22 +462,53 @@ DecompressBuffer(StringInfo buffer,
+ #if HAVE_CITUS_LIBLZ4
+ 		case COMPRESSION_LZ4:
+ 		{
+-			StringInfo decompressedBuffer = makeStringInfo();
+-			enlargeStringInfo(decompressedBuffer, decompressedSize);
+-
++			elog(DEBUG1,"-------------------LZ4_decompressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++
++			// StringInfo decompressedBuffer = makeStringInfo();
++			// makeStringInfo start
++			StringInfo	decompressedBuffer = (StringInfo) palloc(sizeof(StringInfoData));
++			int size = 1024;
++			decompressedBuffer->maxlen = size;
++			decompressedBuffer->len = 0;
++			decompressedBuffer->cursor = 0;
++			// makeStringInfo end
++
++			// enlargeStringInfo(decompressedBuffer, decompressedSize);
++			// enlargeStringInfo start
++			int needed = decompressedSize;
++			needed += decompressedBuffer->len + 1;
++			int newlen = decompressedBuffer->maxlen;
++			if (needed > newlen) {
++				newlen = 2 * newlen;
++				while (needed > newlen) {
++					newlen = 2 * newlen;
++				}
++			}
++			decompressedBuffer->data = *temp_decompressedBuffer + prev_maxlen;
++			decompressedBuffer->maxlen = newlen;
++			// enlargeStringInfo end
++			
+ 			int lz4DecompressSize = LZ4_decompress_safe(buffer->data,
+ 														decompressedBuffer->data,
+ 														buffer->len,
+ 														decompressedSize);
+-
+ 			if (lz4DecompressSize != decompressedSize)
+ 			{
+ 				ereport(ERROR, (errmsg("cannot decompress the buffer"),
+ 								errdetail("Expected %lu bytes, but received %d bytes",
+ 										  decompressedSize, lz4DecompressSize)));
+ 			}
+-
++			// elog(DEBUG1,"LZ4_decompressed| ");
+ 			decompressedBuffer->len = decompressedSize;
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			// Calculate time taken in seconds and microseconds
++			elog(DEBUG1, "Before Decompress: %d After Decompress: %ld", buffer->len,  decompressedSize);
++			elog(DEBUG1, "Elapsed Time: %lf ms", elapsed * 1000);
+ 
+ 			return decompressedBuffer;
+ 		}
+@@ -203,8 +517,33 @@ DecompressBuffer(StringInfo buffer,
+ #if HAVE_LIBZSTD
+ 		case COMPRESSION_ZSTD:
+ 		{
+-			StringInfo decompressedBuffer = makeStringInfo();
+-			enlargeStringInfo(decompressedBuffer, decompressedSize);
++			elog(DEBUG1,"-------------------ZSTD_decompressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++			// StringInfo decompressedBuffer = makeStringInfo();
++			// makeStringInfo start
++			StringInfo	decompressedBuffer = (StringInfo) palloc(sizeof(StringInfoData));
++			int size = 1024;
++			decompressedBuffer->maxlen = size;
++			decompressedBuffer->len = 0;
++			decompressedBuffer->cursor = 0;
++			// makeStringInfo end
++
++			// enlargeStringInfo(decompressedBuffer, decompressedSize);
++			// enlargeStringInfo start
++			int needed = decompressedSize;
++			needed += decompressedBuffer->len + 1;
++			int newlen = decompressedBuffer->maxlen;
++			if (needed > newlen) {
++				newlen = 2 * newlen;
++				while (needed > newlen) {
++					newlen = 2 * newlen;
++				}
++			}
++			decompressedBuffer->data = *temp_decompressedBuffer + prev_maxlen;
++			decompressedBuffer->maxlen = newlen;
++			// enlargeStringInfo end
+ 
+ 			size_t zstdDecompressSize = ZSTD_decompress(decompressedBuffer->data,
+ 														decompressedSize,
+@@ -226,12 +565,24 @@ DecompressBuffer(StringInfo buffer,
+ 
+ 			decompressedBuffer->len = decompressedSize;
+ 
++			// Calculate time taken in seconds and microseconds
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Before Decompress: %d After Decompress: %ld", buffer->len,  decompressedSize);
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
++
+ 			return decompressedBuffer;
+ 		}
+ #endif
+ 
+ 		case COMPRESSION_PG_LZ:
+ 		{
++			elog(DEBUG1,"-------------------PGLZ_decompressed-------------------");
++			struct timespec start, end;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++
+ 			uint32 compressedDataSize = VARSIZE(buffer->data) - COLUMNAR_COMPRESS_HDRSZ;
+ 			uint32 decompressedDataSize = COLUMNAR_COMPRESS_RAWSIZE(buffer->data);
+ 
+@@ -242,7 +593,8 @@ DecompressBuffer(StringInfo buffer,
+ 										  compressedDataSize, buffer->len)));
+ 			}
+ 
+-			char *decompressedData = palloc0(decompressedDataSize);
++			// char *decompressedData = palloc0(decompressedDataSize);
++			char *decompressedData = *temp_decompressedBuffer + prev_maxlen;
+ 
+ 			int32 decompressedByteCount = pglz_decompress(COLUMNAR_COMPRESS_RAWDATA(
+ 															  buffer->data),
+@@ -256,11 +608,170 @@ DecompressBuffer(StringInfo buffer,
+ 								errdetail("compressed data is corrupted")));
+ 			}
+ 
+-			StringInfo decompressedBuffer = palloc0(sizeof(StringInfoData));
++			// StringInfo decompressedBuffer = palloc0(sizeof(StringInfoData));
++			StringInfo decompressedBuffer = (StringInfo) palloc(sizeof(StringInfoData));
+ 			decompressedBuffer->data = decompressedData;
+ 			decompressedBuffer->len = decompressedDataSize;
+ 			decompressedBuffer->maxlen = decompressedDataSize;
+ 
++			// Calculate time taken in seconds and microseconds
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++
++			elog(DEBUG1, "Before Decompress: %d After Decompress: %ld", buffer->len,  decompressedSize);
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
++
++			return decompressedBuffer;
++		}
++
++		case COMPRESSION_QPL:
++		{
++			elog(DEBUG1,"-------------------IAA_decompressed-------------------");
++			struct timespec start, end, start_init, end_init;
++    		double elapsed = 0;
++			clock_gettime(CLOCK_MONOTONIC, &start);
++			// IAA Decompression
++			// StringInfo decompressedBuffer = makeStringInfo();
++			// makeStringInfo start
++			StringInfo	decompressedBuffer = (StringInfo) palloc(sizeof(StringInfoData));
++			int size = 1024;
++			decompressedBuffer->maxlen = size;
++			decompressedBuffer->len = 0;
++			decompressedBuffer->cursor = 0;
++			// makeStringInfo end
++
++			// enlargeStringInfo(decompressedBuffer, decompressedSize);
++			// enlargeStringInfo start
++			int needed = decompressedSize;
++			needed += decompressedBuffer->len + 1;
++			int newlen = decompressedBuffer->maxlen;
++			if (needed > newlen) {
++				newlen = 2 * newlen;
++				while (needed > newlen) {
++					newlen = 2 * newlen;
++				}
++			}
++			decompressedBuffer->data = *temp_decompressedBuffer + prev_maxlen;
++			decompressedBuffer->maxlen = newlen;
++			// enlargeStringInfo end
++
++			clock_gettime(CLOCK_MONOTONIC, &start_init);
++			// memset(decompressedBuffer->data, 0, decompressedBuffer->maxlen);
++			clock_gettime(CLOCK_MONOTONIC, &end_init);
++			elapsed = (end_init.tv_sec - start_init.tv_sec) + (end_init.tv_nsec - start_init.tv_nsec) / 1e9;
++			elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
++			
++			int engine_num = 16;
++			qpl_status status;
++			int chunk_size = 2 * 1024 * 1024;
++			if (decompressedSize <= chunk_size) {
++				int buf_len = buffer->len;
++
++				job[0]->op				= qpl_op_decompress;
++				job[0]->next_in_ptr	= (uint8_t *)(buffer->data);
++				job[0]->next_out_ptr	= (uint8_t *)(decompressedBuffer->data);
++				job[0]->available_in	= buf_len;
++				job[0]->available_out	= (uint32_t) decompressedSize;
++				job[0]->flags = QPL_FLAG_FIRST | QPL_FLAG_LAST;
++
++				status = qpl_execute_job(job[0]);
++				if (status != QPL_STS_OK) {
++					// free(job_buffer);  // Free the allocated memory
++					return false;
++					// return;
++				}
++			} else {
++				int num = (decompressedSize + chunk_size - 1) / chunk_size;
++				int compressed_size = buffer->len - 4* num;
++				// elog(DEBUG1, "compressed_size: %d", compressed_size);
++				int file_left = compressed_size;
++				int source_idx = 0;
++				int dest_idx = 0;
++				int iter = 0;
++				int last_check = 0;
++				while(file_left > 0) {
++					int job_arg = (uint8_t)buffer->data[compressed_size + 4*iter]       // LSB
++						| ((uint8_t)buffer->data[compressed_size + 4*iter + 1] << 8)
++						| ((uint8_t)buffer->data[compressed_size + 4*iter + 2] << 16)
++						| ((uint8_t)buffer->data[compressed_size + 4*iter + 3] << 24);  // MSB
++					// elog(DEBUG1, "num: %d, last 4 bytes: 0x%08X",num, job_arg);
++					int job_idx = iter % (engine_num*2);
++					job[job_idx]->op				= qpl_op_decompress;
++					job[job_idx]->next_in_ptr	= (uint8_t *)(buffer->data + source_idx);
++					job[job_idx]->next_out_ptr	= (uint8_t *)(decompressedBuffer->data + chunk_size * iter);
++					job[job_idx]->available_in	= job_arg;
++					job[job_idx]->available_out	= chunk_size;
++					job[job_idx]->flags = QPL_FLAG_FIRST | QPL_FLAG_LAST;
++					status = qpl_submit_job(job[job_idx]);
++					if (status != QPL_STS_OK) {
++						// free(job_buffer);  // Free the allocated memory
++						return false;
++						// return;
++					}
++					
++					source_idx += job_arg;
++					file_left -= job_arg;
++					iter++;
++					if (iter >= engine_num*2 && iter % engine_num == 0) {
++						int a = (iter / engine_num % 2) * engine_num;
++						for (int i = a; i < a + engine_num; i++) {
++							status = qpl_wait_job(job[i]);
++							if (status != QPL_STS_OK) {
++								elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++								return false;
++								// return;
++							}
++							dest_idx += job[i]->total_out;
++						}
++						last_check = a+ engine_num;
++					}
++				}
++				if (last_check == engine_num) {
++					int a = 0;
++					if (iter >= engine_num * 2) {
++						a = engine_num * 2;
++					}
++					for (int i = last_check; i < a; i++) {
++						status = qpl_wait_job(job[i]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++							return false;
++							// return;
++						}
++						dest_idx += job[i]->total_out;
++					}
++
++					a = iter % (engine_num * 2);
++					for (int i = 0; i < a; i++) {
++						status = qpl_wait_job(job[i]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during job wait.\n", status);
++							return false;
++							// return;
++						}
++						dest_idx += job[i]->total_out;
++					}
++				} else {
++					int a = iter % (engine_num * 2);
++					for (int i = iter - a; i < iter; i++) {
++						int job_idx = i % (engine_num * 2);
++						status = qpl_wait_job(job[job_idx]);
++						if (status != QPL_STS_OK) {
++							elog(DEBUG1, "An error %d acquired during wait execution.\n", status);
++							return false;
++							// return;
++						}
++						dest_idx += job[job_idx]->total_out;
++					}
++				}
++			}
++
++			decompressedBuffer->len = decompressedSize;
++			// free(job_buffer); 
++			clock_gettime(CLOCK_MONOTONIC, &end);
++			elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++			elog(DEBUG1, "Before Decompress: %d After Decompress: %ld", buffer->len,  decompressedSize);
++			elog(DEBUG1, "Elapsed Time: %lf", elapsed * 1000);
+ 			return decompressedBuffer;
+ 		}
+ 
+diff --git a/src/backend/columnar/columnar_reader.c b/src/backend/columnar/columnar_reader.c
+index 7ef0d15d7..c0ffc5dca 100644
+--- a/src/backend/columnar/columnar_reader.c
++++ b/src/backend/columnar/columnar_reader.c
+@@ -37,6 +37,7 @@
+ #include "columnar/columnar_storage.h"
+ #include "columnar/columnar_tableam.h"
+ #include "columnar/columnar_version_compat.h"
++#include <time.h>
+ 
+ #include "distributed/listutils.h"
+ 
+@@ -66,6 +67,8 @@ typedef struct StripeReadState
+ 	StripeBuffers *stripeBuffers;   /* allocated in stripeReadContext */
+ 	List *projectedColumnList;      /* borrowed reference */
+ 	ChunkGroupReadState *chunkGroupReadState; /* owned */
++	qpl_job** job;
++	char* valueBuffer;
+ } StripeReadState;
+ 
+ struct ColumnarReadState
+@@ -97,6 +100,8 @@ struct ColumnarReadState
+ 
+ 	Snapshot snapshot;
+ 	bool snapshotRegisteredByUs;
++	qpl_job** job;
++	char* valueBuffer;
+ };
+ 
+ /* static function declarations */
+@@ -119,7 +124,7 @@ static StripeReadState * BeginStripeRead(StripeMetadata *stripeMetadata, Relatio
+ 										 TupleDesc tupleDesc, List *projectedColumnList,
+ 										 List *whereClauseList, List *whereClauseVars,
+ 										 MemoryContext stripeReadContext,
+-										 Snapshot snapshot);
++										 Snapshot snapshot, qpl_job** job, char* valueBuffer);
+ static void AdvanceStripeRead(ColumnarReadState *readState);
+ static bool SnapshotMightSeeUnflushedStripes(Snapshot snapshot);
+ static bool ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
+@@ -128,7 +133,7 @@ static ChunkGroupReadState * BeginChunkGroupRead(StripeBuffers *stripeBuffers, i
+ 												 chunkIndex,
+ 												 TupleDesc tupleDesc,
+ 												 List *projectedColumnList,
+-												 MemoryContext cxt);
++												 MemoryContext cxt, qpl_job** job, char** valueBuffer);
+ static void EndChunkGroupRead(ChunkGroupReadState *chunkGroupReadState);
+ static bool ReadChunkGroupNextRow(ChunkGroupReadState *chunkGroupReadState,
+ 								  Datum *columnValues,
+@@ -166,7 +171,7 @@ static void DeserializeDatumArray(StringInfo datumBuffer, bool *existsArray,
+ 								  Datum *datumArray);
+ static ChunkData * DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
+ 										uint32 rowCount, TupleDesc tupleDescriptor,
+-										List *projectedColumnList);
++										List *projectedColumnList, qpl_job** job, char** temp_valueBuffer);
+ static Datum ColumnDefaultValue(TupleConstr *tupleConstraints,
+ 								Form_pg_attribute attributeForm);
+ 
+@@ -182,6 +187,7 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
+ 				  MemoryContext scanContext, Snapshot snapshot,
+ 				  bool randomAccess)
+ {
++	elog(DEBUG1, "ColumnarBeginRead");
+ 	/*
+ 	 * We allocate all stripe specific data in the stripeReadContext, and reset
+ 	 * this memory context before loading a new stripe. This is to avoid memory
+@@ -206,6 +212,44 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
+ 	 */
+ 	readState->snapshot = snapshot;
+ 	readState->snapshotRegisteredByUs = false;
++	struct timespec start, end;
++	double elapsed = 0;
++	clock_gettime(CLOCK_MONOTONIC, &start);
++	uint8_t** job_buffer = NULL;  // Equivalent to std::unique_ptr<uint8_t[]>
++	uint32_t size = 0;
++	qpl_job** job = NULL;
++	int wq_size = 32;
++	qpl_path_t execution_path = qpl_path_hardware;
++	qpl_status status = qpl_get_job_size(execution_path, &size);
++	if (status != QPL_STS_OK) {
++		elog(DEBUG1, "An error %d occurred during job size getting.\n", status);
++		return false;
++	}
++	job_buffer = (uint8_t**)malloc(wq_size*sizeof(uint8_t*));
++	job = (qpl_job**)malloc(wq_size*sizeof(qpl_job*));
++	for (int i = 0; i< wq_size; i++) {
++		job_buffer[i] = (uint8_t*) malloc(size * sizeof(uint8_t));
++		if (job_buffer[i] == NULL) {
++			elog(DEBUG1,"Memory allocation failed.\n");
++			return false;
++		}
++		job[i] = (qpl_job*)job_buffer[i];
++		status = qpl_init_job(execution_path, job[i]);
++		if (status != QPL_STS_OK) {
++			elog(DEBUG1, "An error %d occurred during job initializing.\n", status);
++			return false;
++		}
++	}
++	clock_gettime(CLOCK_MONOTONIC, &end);
++	elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++	elog(DEBUG1, "Init Time: %lf", elapsed * 1000);
++	readState->job = job;
++	int buf_size = 256 * 1024 * 1024;
++	clock_gettime(CLOCK_MONOTONIC, &start);
++	readState->valueBuffer = (char *)palloc0(buf_size);
++	clock_gettime(CLOCK_MONOTONIC, &end);
++	elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++	elog(DEBUG1, "Wait Time: %lf", elapsed * 1000);
+ 
+ 	if (!randomAccess)
+ 	{
+@@ -340,14 +384,19 @@ ColumnarReadNextRow(ColumnarReadState *readState, Datum *columnValues, bool *col
+ 														 readState->whereClauseList,
+ 														 readState->whereClauseVars,
+ 														 readState->stripeReadContext,
+-														 readState->snapshot);
++														 readState->snapshot,
++														 readState->job,
++														 readState->valueBuffer);
+ 		}
+ 
+ 		if (!ReadStripeNextRow(readState->stripeReadState, columnValues, columnNulls))
+ 		{
++			// elog(DEBUG1, "Before AdvanceStripeRead");
+ 			AdvanceStripeRead(readState);
++			// elog(DEBUG1, "After AdvanceStripeRead");
+ 			continue;
+ 		}
++		// elog(DEBUG1, "ColumnarReadNextRow");
+ 
+ 		if (rowNumber)
+ 		{
+@@ -431,7 +480,7 @@ ColumnarReadRowByRowNumber(ColumnarReadState *readState,
+ 													 whereClauseList,
+ 													 whereClauseVars,
+ 													 stripeReadContext,
+-													 snapshot);
++													 snapshot, readState->job, readState->valueBuffer);
+ 
+ 		readState->currentStripeMetadata = stripeMetadata;
+ 	}
+@@ -511,7 +560,10 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
+ 			stripeReadState->chunkGroupIndex,
+ 			stripeReadState->tupleDescriptor,
+ 			stripeReadState->projectedColumnList,
+-			stripeReadState->stripeReadContext);
++			stripeReadState->stripeReadContext
++			, stripeReadState->job
++			, &stripeReadState->valueBuffer);
++		// elog(DEBUG1, "ReadStripeRowByRowNumber");
+ 	}
+ 
+ 	ReadChunkGroupRowByRowOffset(stripeReadState->chunkGroupReadState,
+@@ -606,6 +658,7 @@ ColumnarRescan(ColumnarReadState *readState, List *scanQual)
+ void
+ ColumnarEndRead(ColumnarReadState *readState)
+ {
++	elog(DEBUG1, "ColumnarEndRead");
+ 	if (readState->snapshotRegisteredByUs)
+ 	{
+ 		/*
+@@ -621,7 +674,19 @@ ColumnarEndRead(ColumnarReadState *readState)
+ 		pfree(readState->currentStripeMetadata);
+ 	}
+ 
++	int wq_size = 32;
++	for (int i = 0; i < wq_size; i++) {
++		qpl_status status = qpl_fini_job(readState->job[i]);
++		if (status != QPL_STS_OK) {
++			elog(DEBUG1, "An error %d acquired during job finalization.\n", status);
++			pfree(readState);
++			return;
++		}
++	}
++	elog(DEBUG1, "QPL is free");
++
+ 	pfree(readState);
++	
+ }
+ 
+ 
+@@ -649,7 +714,7 @@ ColumnarResetRead(ColumnarReadState *readState)
+ static StripeReadState *
+ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDesc,
+ 				List *projectedColumnList, List *whereClauseList, List *whereClauseVars,
+-				MemoryContext stripeReadContext, Snapshot snapshot)
++				MemoryContext stripeReadContext, Snapshot snapshot, qpl_job** job, char* valueBuffer)
+ {
+ 	MemoryContext oldContext = MemoryContextSwitchTo(stripeReadContext);
+ 
+@@ -661,7 +726,9 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
+ 	stripeReadState->chunkGroupReadState = NULL;
+ 	stripeReadState->projectedColumnList = projectedColumnList;
+ 	stripeReadState->stripeReadContext = stripeReadContext;
+-
++	stripeReadState->job = job;
++	stripeReadState->valueBuffer = valueBuffer;
++	
+ 	stripeReadState->stripeBuffers = LoadFilteredStripeBuffers(rel,
+ 															   stripeMetadata,
+ 															   tupleDesc,
+@@ -676,7 +743,6 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
+ 
+ 	MemoryContextSwitchTo(oldContext);
+ 
+-
+ 	return stripeReadState;
+ }
+ 
+@@ -794,7 +860,10 @@ ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
+ 				stripeReadState->
+ 				projectedColumnList,
+ 				stripeReadState->
+-				stripeReadContext);
++				stripeReadContext
++				, stripeReadState->job
++				, &stripeReadState->valueBuffer);
++			// elog(DEBUG1, "ReadStripeNextRow");
+ 		}
+ 
+ 		if (!ReadChunkGroupNextRow(stripeReadState->chunkGroupReadState, columnValues,
+@@ -821,7 +890,7 @@ ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
+  */
+ static ChunkGroupReadState *
+ BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupleDesc,
+-					List *projectedColumnList, MemoryContext cxt)
++					List *projectedColumnList, MemoryContext cxt, qpl_job** job, char** valueBuffer)
+ {
+ 	uint32 chunkGroupRowCount =
+ 		stripeBuffers->selectedChunkGroupRowCounts[chunkIndex];
+@@ -838,8 +907,10 @@ BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupl
+ 	chunkGroupReadState->chunkGroupData = DeserializeChunkData(stripeBuffers, chunkIndex,
+ 															   chunkGroupRowCount,
+ 															   tupleDesc,
+-															   projectedColumnList);
++															   projectedColumnList, job, valueBuffer);
++	// elog(DEBUG1, "after DeserializeChunkData");
+ 	MemoryContextSwitchTo(oldContext);
++	// elog(DEBUG1, "after MemoryContextSwitchTo");
+ 
+ 	return chunkGroupReadState;
+ }
+@@ -1584,15 +1655,16 @@ DeserializeDatumArray(StringInfo datumBuffer, bool *existsArray, uint32 datumCou
+ static ChunkData *
+ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
+ 					 uint32 rowCount, TupleDesc tupleDescriptor,
+-					 List *projectedColumnList)
++					 List *projectedColumnList, qpl_job** job, char** temp_valueBuffer)
+ {
+ 	int columnIndex = 0;
+ 	bool *columnMask = ProjectedColumnMask(tupleDescriptor->natts, projectedColumnList);
+ 	ChunkData *chunkData = CreateEmptyChunkData(tupleDescriptor->natts, columnMask,
+ 												rowCount);
+-
++	int prev_maxlen = 0;
+ 	for (columnIndex = 0; columnIndex < stripeBuffers->columnCount; columnIndex++)
+ 	{
++		// elog(DEBUG1, "column count: %d", stripeBuffers->columnCount);
+ 		Form_pg_attribute attributeForm = TupleDescAttr(tupleDescriptor, columnIndex);
+ 		ColumnBuffers *columnBuffers = stripeBuffers->columnBuffersArray[columnIndex];
+ 		bool columnAdded = false;
+@@ -1608,10 +1680,14 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
+ 				columnBuffers->chunkBuffersArray[chunkIndex];
+ 
+ 			/* decompress and deserialize current chunk's data */
++			// StringInfo valueBuffer =
++			// 	DecompressBuffer(chunkBuffers->valueBuffer,
++			// 					 chunkBuffers->valueCompressionType,
++			// 					 chunkBuffers->decompressedValueSize, job);
+ 			StringInfo valueBuffer =
+ 				DecompressBuffer(chunkBuffers->valueBuffer,
+ 								 chunkBuffers->valueCompressionType,
+-								 chunkBuffers->decompressedValueSize);
++								 chunkBuffers->decompressedValueSize, job, temp_valueBuffer, prev_maxlen );
+ 
+ 			DeserializeBoolArray(chunkBuffers->existsBuffer,
+ 								 chunkData->existsArray[columnIndex],
+@@ -1623,6 +1699,7 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
+ 
+ 			/* store current chunk's data buffer to be freed at next chunk read */
+ 			chunkData->valueBufferArray[columnIndex] = valueBuffer;
++			prev_maxlen += valueBuffer->maxlen;
+ 		}
+ 		else if (columnAdded)
+ 		{
+diff --git a/src/backend/columnar/columnar_writer.c b/src/backend/columnar/columnar_writer.c
+index 1bdc612c1..d4b952d05 100644
+--- a/src/backend/columnar/columnar_writer.c
++++ b/src/backend/columnar/columnar_writer.c
+@@ -65,6 +65,7 @@ struct ColumnarWriteState
+ 	 * deallocated when memory context is reset.
+ 	 */
+ 	StringInfo compressionBuffer;
++	qpl_job** job;
+ };
+ 
+ static StripeBuffers * CreateEmptyStripeBuffers(uint32 stripeMaxRowCount,
+@@ -146,6 +147,39 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
+ 	writeState->perTupleContext = AllocSetContextCreate(CurrentMemoryContext,
+ 														"Columnar per tuple context",
+ 														ALLOCSET_DEFAULT_SIZES);
++	
++	struct timespec start, end;
++	double elapsed = 0;
++	clock_gettime(CLOCK_MONOTONIC, &start);
++	uint8_t** job_buffer = NULL;  // Equivalent to std::unique_ptr<uint8_t[]>
++	uint32_t size = 0;
++	qpl_job** job = NULL;
++	int wq_size = 8;
++	qpl_path_t execution_path = qpl_path_hardware;
++	qpl_status status = qpl_get_job_size(execution_path, &size);
++	if (status != QPL_STS_OK) {
++		elog(DEBUG1, "An error %d occurred during job size getting.\n", status);
++		return false;
++	}
++	job_buffer = (uint8_t**)malloc(wq_size*sizeof(uint8_t*));
++	job = (qpl_job**)malloc(wq_size*sizeof(qpl_job*));
++	for (int i = 0; i< wq_size; i++) {
++		job_buffer[i] = (uint8_t*) malloc(size * sizeof(uint8_t));
++		if (job_buffer[i] == NULL) {
++			elog(DEBUG1,"Memory allocation failed.\n");
++			return false;
++		}
++		job[i] = (qpl_job*)job_buffer[i];
++		status = qpl_init_job(execution_path, job[i]);
++		if (status != QPL_STS_OK) {
++			elog(DEBUG1, "An error %d occurred during job initializing.\n", status);
++			return false;
++		}
++	}
++	clock_gettime(CLOCK_MONOTONIC, &end);
++	elapsed = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
++	elog(DEBUG1, "Init Time: %lf", elapsed * 1000);
++	writeState->job = job;
+ 
+ 	return writeState;
+ }
+@@ -275,6 +309,16 @@ ColumnarEndWrite(ColumnarWriteState *writeState)
+ 	MemoryContextDelete(writeState->stripeWriteContext);
+ 	pfree(writeState->comparisonFunctionArray);
+ 	FreeChunkData(writeState->chunkData);
++	int wq_size = 8;
++	for (int i = 0; i < wq_size; i++) {
++		qpl_status status = qpl_fini_job(writeState->job[i]);
++		if (status != QPL_STS_OK) {
++			elog(DEBUG1, "An error %d acquired during job finalization.\n", status);
++			pfree(writeState);
++			return;
++		}
++	}
++	elog(DEBUG1, "QPL is free");
+ 	pfree(writeState);
+ }
+ 
+@@ -633,7 +677,7 @@ SerializeChunkData(ColumnarWriteState *writeState, uint32 chunkIndex, uint32 row
+ 		 */
+ 		bool compressed = CompressBuffer(serializedValueBuffer, compressionBuffer,
+ 										 requestedCompressionType,
+-										 compressionLevel);
++										 compressionLevel, writeState->job);
+ 		if (compressed)
+ 		{
+ 			serializedValueBuffer = compressionBuffer;
+diff --git a/src/include/columnar/columnar.h b/src/include/columnar/columnar.h
+index 66413dddd..ceb2b339c 100644
+--- a/src/include/columnar/columnar.h
++++ b/src/include/columnar/columnar.h
+@@ -47,7 +47,7 @@
+ #define STRIPE_ROW_COUNT_MINIMUM 1000
+ #define STRIPE_ROW_COUNT_MAXIMUM 10000000
+ #define CHUNK_ROW_COUNT_MINIMUM 1000
+-#define CHUNK_ROW_COUNT_MAXIMUM 100000
++#define CHUNK_ROW_COUNT_MAXIMUM 2000000
+ #define COMPRESSION_LEVEL_MIN 1
+ #define COMPRESSION_LEVEL_MAX 19
+ 
+diff --git a/src/include/columnar/columnar_compression.h b/src/include/columnar/columnar_compression.h
+index 5b9710f20..4c52ce999 100644
+--- a/src/include/columnar/columnar_compression.h
++++ b/src/include/columnar/columnar_compression.h
+@@ -11,7 +11,7 @@
+ 
+ #ifndef COLUMNAR_COMPRESSION_H
+ #define COLUMNAR_COMPRESSION_H
+-
++#include <qpl/qpl.h>
+ /* Enumaration for columnar table's compression method */
+ typedef enum
+ {
+@@ -20,6 +20,7 @@ typedef enum
+ 	COMPRESSION_PG_LZ = 1,
+ 	COMPRESSION_LZ4 = 2,
+ 	COMPRESSION_ZSTD = 3,
++	COMPRESSION_QPL = 4,
+ 
+ 	COMPRESSION_COUNT
+ } CompressionType;
+@@ -27,8 +28,8 @@ typedef enum
+ extern bool CompressBuffer(StringInfo inputBuffer,
+ 						   StringInfo outputBuffer,
+ 						   CompressionType compressionType,
+-						   int compressionLevel);
++						   int compressionLevel, qpl_job** job);
+ extern StringInfo DecompressBuffer(StringInfo buffer, CompressionType compressionType,
+-								   uint64 decompressedSize);
++								   uint64 decompressedSize, qpl_job** job, char** temp_decompressedBuffer, int prev_maxlen);
+ 
+ #endif /* COLUMNAR_COMPRESSION_H */
