@@ -208,7 +208,14 @@ else
 fi
 
 # Cleanup: Remove unwanted files after benchmark execution
-rm -f "$GIT_ROOT/data/silesia_data/compressed_data/"*.iaa.*
-rm -f "$GIT_ROOT/data/silesia_data/decompressed_data/"*.iaa.*
+if [[ -d "$GIT_ROOT/data/silesia_data" && -d "$GIT_ROOT/data/silesia_data/compressed_data" && -d "$GIT_ROOT/data/silesia_data/decompressed_data" ]]; then
+    rm -f "$GIT_ROOT/data/silesia_data/compressed_data/"*.iaa.*
+    rm -f "$GIT_ROOT/data/silesia_data/decompressed_data/"*.iaa.*
+fi
+
+if [[ -d "$GIT_ROOT/data/clickbench_data" && -d "$GIT_ROOT/data/clickbench_data/compressed_data" && -d "$GIT_ROOT/data/clickbench_data/decompressed_data" ]]; then
+    rm -f "$GIT_ROOT/data/clickbench_data/compressed_data/"*.iaa.*
+    rm -f "$GIT_ROOT/data/clickbench_data/decompressed_data/"*.iaa.*
+fi
 
 echo "All benchmarks completed successfully!"
