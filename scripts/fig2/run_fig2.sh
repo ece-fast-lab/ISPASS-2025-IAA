@@ -207,4 +207,8 @@ else
     run_benchmark "$P_ARG"
 fi
 
+# Cleanup: Remove unwanted files after benchmark execution
+rm -f "$GIT_ROOT/data/silesia_data/compressed_data/"*.iaa.*
+rm -f "$GIT_ROOT/data/silesia_data/decompressed_data/"*.iaa.*
+
 echo "All benchmarks completed successfully!"
