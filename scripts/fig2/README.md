@@ -15,7 +15,7 @@ Example:
 ```bash
 ./run_fig2.sh -p all -d /PATH_TO/ISPASS-2025-IAA/data/silesia_data/FILE_NAME
 ```
-**⚠️Important Note**: Before running the microbenchmark with `hits.csv`, ensure that there is sufficient memory available. If there is not enough memory, the script may not provide accurate performance results.
+**⚠️Important Note**: Before running the microbenchmark with `hits.csv`, ensure that there is sufficient memory (more than 80GB) available. If there is not enough memory, the script may not provide accurate performance results.
 
 ### 3️⃣ Draw the Figure
 ```bash
