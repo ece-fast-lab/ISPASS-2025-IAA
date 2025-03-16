@@ -148,4 +148,14 @@ run_benchmark() {
 echo "Running benchmarks for $P_ARG..."
 run_benchmark "$P_ARG"
 
+if [[ -d "$GIT_ROOT/data/silesia_data" && -d "$GIT_ROOT/data/silesia_data/compressed_data" && -d "$GIT_ROOT/data/silesia_data/decompressed_data" ]]; then
+    rm -f "$GIT_ROOT/data/silesia_data/compressed_data/"*.iaa.*
+    rm -f "$GIT_ROOT/data/silesia_data/decompressed_data/"*.iaa.*
+fi
+
+if [[ -d "$GIT_ROOT/data/clickbench_data" && -d "$GIT_ROOT/data/clickbench_data/compressed_data" && -d "$GIT_ROOT/data/clickbench_data/decompressed_data" ]]; then
+    find "$GIT_ROOT/data/clickbench_data/compressed_data/" -type f -delete
+    find "$GIT_ROOT/data/clickbench_data/decompressed_data/" -type f -delete
+fi
+
 echo "All benchmarks completed successfully!"
