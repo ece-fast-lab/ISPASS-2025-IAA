@@ -9,11 +9,11 @@ chmod +x run_fig3.sh
 
 ### 2️⃣ Run the Script
 ```bash
-./run_fig3.sh -p hardware_path -d [/PATH_TO/DATA] -e 8 -s auto
+./run_fig3.sh -p hardware_path -d [/PATH_TO/DATA] -e 1 -s auto
 ```
 Example:
 ```bash
-./run_fig3.sh -p hardware_path -d /PATH_TO/ISPASS-2025-IAA/data/silesia_data/FILE_NAME -e 8 -s auto
+./run_fig3.sh -p hardware_path -d /PATH_TO/ISPASS-2025-IAA/data/silesia_data/FILE_NAME -e 1 -s auto
 ```
 
 ### 3️⃣ Draw the Figure
