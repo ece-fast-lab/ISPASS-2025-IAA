@@ -34,6 +34,7 @@ fig2_f.png
 fig2_g.png
 fig2_h.png
 ```
+**⚠️Important Note**: If the results from the software path appear incorrect, please run it multiple times. Due to thread synchronization, the software path does not guarantee consistent trends.
 
 ---
 
