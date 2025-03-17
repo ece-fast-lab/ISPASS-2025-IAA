@@ -2,6 +2,11 @@
 
 ## Steps to Generate and View Figure 4
 
+### 0️⃣ Install Essential Python Packages
+```bash
+pip install zstd lz4 python-snappy
+```
+
 ### 1️⃣ Make the Script Executable
 ```bash
 chmod +x run_fig4.sh

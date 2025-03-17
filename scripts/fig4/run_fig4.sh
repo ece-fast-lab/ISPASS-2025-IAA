@@ -46,14 +46,14 @@ fi
 SE_VALUES=(1)  # Removed 'local'
 for SE_ARG in "${SE_VALUES[@]}"; do
     echo "==========================================================================" >> "$SUMMARY_FILE"
-    ./decompression_scan software_path "$GIT_ROOT/data/lineitem/iaa_compressed/" "$SE_ARG" | tee -a "$SUMMARY_FILE"
+    ./decompression_scan software_path "$GIT_ROOT/data/lineitem/iaa_compressed/" "$SE_ARG" "$GIT_ROOT/data/lineitem/" | tee -a "$SUMMARY_FILE"
 done
 # Run decompression_scan with provided -e argument
 E_VALUES=(1 2 4 8)  # Removed 'local'
 for E_ARG in "${E_VALUES[@]}"; do
     echo "==========================================================================" >> "$SUMMARY_FILE"
     echo "IAA with $E_ARG engines" >> "$SUMMARY_FILE"
-    ./decompression_scan hardware_path "$GIT_ROOT/data/lineitem/iaa_compressed/" "$E_ARG" | tee -a "$SUMMARY_FILE"
+    ./decompression_scan hardware_path "$GIT_ROOT/data/lineitem/iaa_compressed/" "$E_ARG" "$GIT_ROOT/data/lineitem/" | tee -a "$SUMMARY_FILE"
 done
 
 echo "Pandas evaluation completed successfully!"

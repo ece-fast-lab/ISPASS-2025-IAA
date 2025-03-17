@@ -694,7 +694,7 @@ int query_processing(std::string src_data_file_dir, std::string dest_data_file_d
     
     return 0;
 }
-int pipeliined_query_processing(std::string src_data_file_dir, std::string dest_data_file_dir, qpl_path_t execution_path, const uint32_t queue_size)
+int pipeliined_query_processing(std::string orig_file_path, std::string src_data_file_dir, std::string dest_data_file_dir, qpl_path_t execution_path, const uint32_t queue_size)
 {
     std::cout << "[IAA with Pipelining Functionality]" << std::endl;
     std::vector<uint32_t> iteration(4, 0);
@@ -790,7 +790,7 @@ int pipeliined_query_processing(std::string src_data_file_dir, std::string dest_
         extend_result[i].resize(chunk_size);
         discount_result[i].resize(chunk_size);
     }
-    std::string orig_file_path = "/home/jykang5/tpc_h_100g/lineitem_data/";
+
     // shipdate
     std::string shipdate_src_file_path = src_data_file_dir + columns[2] + ".bin.iaa.compressed";
     uint32_t shipdate_iteration = iteration[2];
@@ -951,6 +951,7 @@ auto main(int argc, char** argv) -> int {
     const std::string COMPRESSED_DATA_FILE_DIR    = argv[2];
     const std::string DECOMPRESSED_DATA_FILE_NAME    = "";// argv[3];
     const uint32_t queue_size = static_cast<uint32_t>(atoi(argv[3]));
+    const std::string orig_file_path = argv[4];
 
     // Decompression
     if(query_processing(COMPRESSED_DATA_FILE_DIR, DECOMPRESSED_DATA_FILE_NAME, execution_path, queue_size) != 0) {
@@ -962,7 +963,7 @@ auto main(int argc, char** argv) -> int {
         std::cout << std::endl;
         return 0;
     }
-    if(pipeliined_query_processing(COMPRESSED_DATA_FILE_DIR, DECOMPRESSED_DATA_FILE_NAME, execution_path, queue_size) != 0) {
+    if(pipeliined_query_processing(orig_file_path, COMPRESSED_DATA_FILE_DIR, DECOMPRESSED_DATA_FILE_NAME, execution_path, queue_size) != 0) {
         std::cout << "An error acquired during iaa_execution(decompression)" << std::endl;
         return 1;
     }
